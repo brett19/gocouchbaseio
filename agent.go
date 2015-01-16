@@ -71,7 +71,8 @@ type memdServer struct {
 	opMap   map[uint32]*memdRequest
 	mapLock sync.Mutex
 
-	recvHdrBuf []byte
+	recvBuf  []byte
+	writeBuf []byte
 }
 
 func (s *memdServer) hostname() string {
@@ -161,11 +162,10 @@ type Agent struct {
 // Creates a new memdServer object for the specified address.
 func (c *Agent) createServer(addr string) *memdServer {
 	return &memdServer{
-		address:    addr,
-		useSsl:     c.useSsl,
-		reqsCh:     make(chan *memdRequest, 1000),
-		opMap:      make(map[uint32]*memdRequest, 2000),
-		recvHdrBuf: make([]byte, 24),
+		address: addr,
+		useSsl:  c.useSsl,
+		reqsCh:  make(chan *memdRequest, 1000),
+		opMap:   make(map[uint32]*memdRequest, 2000),
 	}
 }
 
@@ -299,18 +299,47 @@ func (s *memdServer) DoSelectBucket(b []byte) error {
 	return err
 }
 
-func (s *memdServer) readResponse() (*memdResponse, error) {
-	hdrBuf := s.recvHdrBuf
+func (s *memdServer) readBuffered(n int) ([]byte, error) {
+	// Make sure our buffer is big enough to hold all our data
+	if len(s.recvBuf) < n {
+		neededSize := 4096
+		if neededSize < n {
+			neededSize = n
+		}
+		newBuf := make([]byte, neededSize)
+		copy(newBuf[0:], s.recvBuf[0:])
+		s.recvBuf = newBuf[0:len(s.recvBuf)]
+	}
 
-	_, err := io.ReadFull(s.conn, hdrBuf)
+	// Loop till we encounter an error or have enough data...
+	for {
+		// Check if we already have enough data buffered
+		if n <= len(s.recvBuf) {
+			buf := s.recvBuf[0:n]
+			s.recvBuf = s.recvBuf[n:]
+			return buf, nil
+		}
+
+		// Read data up to the capacity
+		recvTgt := s.recvBuf[len(s.recvBuf):cap(s.recvBuf)]
+		n, err := s.conn.Read(recvTgt)
+		if n <= 0 {
+			return nil, err
+		}
+
+		// Update the len of our slice to encompass our new data
+		s.recvBuf = s.recvBuf[:len(s.recvBuf)+n]
+	}
+}
+
+func (s *memdServer) readResponse() (*memdResponse, error) {
+	hdrBuf, err := s.readBuffered(24)
 	if err != nil {
 		return nil, err
 	}
 
 	bodyLen := int(binary.BigEndian.Uint32(hdrBuf[8:]))
-
-	bodyBuf := make([]byte, bodyLen)
-	_, err = io.ReadFull(s.conn, bodyBuf)
+	bodyBuf, err := s.readBuffered(bodyLen)
 	if err != nil {
 		return nil, err
 	}
@@ -331,12 +360,45 @@ func (s *memdServer) readResponse() (*memdResponse, error) {
 	}, nil
 }
 
-func (s *memdServer) writeRequest(req *memdRequest) error {
+func (s *memdServer) flushWrites() error {
+	if len(s.writeBuf) > 0 {
+		_, err := s.conn.Write(s.writeBuf)
+		if err != nil {
+			return err
+		}
+		s.writeBuf = s.writeBuf[0:0]
+	}
+	return nil
+}
+
+const (
+	writeBufferSize = 4096
+)
+
+func (s *memdServer) queueWriteRequest(req *memdRequest) error {
 	extLen := len(req.Extras)
 	keyLen := len(req.Key)
 	valLen := len(req.Value)
+	totalLen := 24 + keyLen + extLen + valLen
 
-	buffer := make([]byte, 24+keyLen+extLen+valLen)
+	if cap(s.writeBuf)-len(s.writeBuf) < totalLen {
+		// Not enough room left in the buffer, lets flush first
+		if err := s.flushWrites(); err != nil {
+			return err
+		}
+
+		// Make sure the buffer is big enough for our next write
+		if cap(s.writeBuf) < totalLen {
+			if totalLen > writeBufferSize {
+				s.writeBuf = make([]byte, 0, totalLen)
+			} else {
+				s.writeBuf = make([]byte, 0, writeBufferSize)
+			}
+		}
+	}
+
+	buffer := s.writeBuf[len(s.writeBuf):cap(s.writeBuf)]
+	s.writeBuf = s.writeBuf[0 : len(s.writeBuf)+totalLen]
 
 	buffer[0] = uint8(req.Magic)
 	buffer[1] = uint8(req.Opcode)
@@ -344,7 +406,7 @@ func (s *memdServer) writeRequest(req *memdRequest) error {
 	buffer[4] = byte(extLen)
 	buffer[5] = req.Datatype
 	binary.BigEndian.PutUint16(buffer[6:], uint16(req.vBucket))
-	binary.BigEndian.PutUint32(buffer[8:], uint32(len(buffer)-24))
+	binary.BigEndian.PutUint32(buffer[8:], uint32(totalLen-24))
 	binary.BigEndian.PutUint32(buffer[12:], req.opaque)
 	binary.BigEndian.PutUint64(buffer[16:], req.Cas)
 
@@ -352,8 +414,14 @@ func (s *memdServer) writeRequest(req *memdRequest) error {
 	copy(buffer[24+extLen:], req.Key)
 	copy(buffer[24+extLen+keyLen:], req.Value)
 
-	_, err := s.conn.Write(buffer)
-	return err
+	return nil
+}
+
+func (s *memdServer) writeRequest(req *memdRequest) error {
+	if err := s.queueWriteRequest(req); err != nil {
+		return nil
+	}
+	return s.flushWrites()
 }
 
 func (c *Agent) serverConnectRun(s *memdServer, authFn AuthFunc) {
@@ -385,6 +453,7 @@ func (c *Agent) serverRun(s *memdServer) {
 	}()
 
 	// Writing
+	var nextFlush <-chan time.Time = nil
 	for {
 		select {
 		case req := <-s.reqsCh:
@@ -396,7 +465,7 @@ func (c *Agent) serverRun(s *memdServer) {
 				continue
 			}
 
-			err := s.writeRequest(req)
+			err := s.queueWriteRequest(req)
 			if err != nil {
 				// Lock the server to write to it's queue, as used in dispatchRequest.
 				//   If the server has already been drained, this indicates that the routing
@@ -412,6 +481,15 @@ func (c *Agent) serverRun(s *memdServer) {
 				}
 				break
 			}
+
+			if nextFlush == nil {
+				nextFlush = time.After(2 * time.Microsecond)
+			}
+
+		case <-nextFlush:
+			s.flushWrites()
+			nextFlush = nil
+
 		case <-killSig:
 			break
 		}
