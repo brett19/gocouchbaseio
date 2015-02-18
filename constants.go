@@ -61,6 +61,8 @@ const (
 	StatusNotStored      = StatusCode(0x05)
 	StatusBadDelta       = StatusCode(0x06)
 	StatusNotMyVBucket   = StatusCode(0x07)
+	StatusAuthError      = StatusCode(0x20)
+	StatusAuthContinue   = StatusCode(0x21)
 	StatusUnknownCommand = StatusCode(0x81)
 	StatusOutOfMemory    = StatusCode(0x82)
 	StatusTmpFail        = StatusCode(0x86)

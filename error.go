@@ -50,6 +50,10 @@ func (e memdError) Error() string {
 		return "An invalid delta was passed."
 	case StatusNotMyVBucket:
 		return "Operation sent to incorrect server."
+	case StatusAuthError:
+		return "Authentication Error."
+	case StatusAuthContinue:
+		return "Auth Continue."
 	case StatusUnknownCommand:
 		return "An unknown command was received."
 	case StatusOutOfMemory:
@@ -68,6 +72,9 @@ func (e memdError) KeyExists() bool {
 }
 func (e memdError) Temporary() bool {
 	return e.code == StatusOutOfMemory || e.code == StatusTmpFail
+}
+func (e memdError) AuthError() bool {
+	return e.code == StatusAuthError
 }
 
 type agentError struct {

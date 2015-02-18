@@ -58,6 +58,17 @@ func createAgent(memdAddrs, httpAddrs []string, useSsl bool, bucketName string, 
 	return c, nil
 }
 
+type AuthErrorType interface {
+	AuthError() bool
+}
+
+func isAuthError(err error) bool {
+	te, ok := err.(interface {
+		AuthError() bool
+	})
+	return ok && te.AuthError()
+}
+
 func (c *Agent) connect(memdAddrs, httpAddrs []string) error {
 	logDebugf("Attempting to connect...")
 
@@ -69,6 +80,9 @@ func (c *Agent) connect(memdAddrs, httpAddrs []string) error {
 		logDebugf("Trying to connect")
 		err := c.connectPipeline(srv)
 		if err != nil {
+			if isAuthError(err) {
+				return err
+			}
 			logDebugf("Connecting failed! %v", err)
 			continue
 		}
