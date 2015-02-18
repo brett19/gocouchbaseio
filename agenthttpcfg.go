@@ -18,29 +18,6 @@ func (i *configStreamBlock) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (c *Agent) httpConfigStream(address, hostname, bucket string) {
-	uri := fmt.Sprintf("%s/pools/default/bucketsStreaming/%s", address, bucket)
-	resp, err := c.httpCli.Get(uri)
-	if err != nil {
-		return
-	}
-
-	dec := json.NewDecoder(resp.Body)
-	configBlock := new(configStreamBlock)
-	for {
-		err := dec.Decode(configBlock)
-		if err != nil {
-			resp.Body.Close()
-			return
-		}
-
-		bkCfg, err := parseConfig(configBlock.Bytes, hostname)
-		if err == nil {
-			c.updateConfig(bkCfg)
-		}
-	}
-}
-
 func hostnameFromUri(uri string) string {
 	uriInfo, err := url.Parse(uri)
 	if err != nil {
