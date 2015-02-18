@@ -11,9 +11,10 @@ import (
 // This is used internally by the higher level classes for communicating with the cluster,
 // it can also be used to perform more advanced operations with a cluster.
 type Agent struct {
-	bucket string
-	useSsl bool
-	initFn memdInitFunc
+	bucket   string
+	password string
+	useSsl   bool
+	initFn   memdInitFunc
 
 	routingInfo routeDataPtr
 	numVbuckets int
@@ -23,7 +24,7 @@ type Agent struct {
 
 type AuthFunc func(AuthClient) error
 
-func CreateDcpAgent(memdAddrs, httpAddrs []string, useSsl bool, bucketName string, authFn AuthFunc, dcpStreamName string) (*Agent, error) {
+func CreateDcpAgent(memdAddrs, httpAddrs []string, useSsl bool, bucketName, password string, authFn AuthFunc, dcpStreamName string) (*Agent, error) {
 	// We wrap the authorization system to force DCP channel opening
 	//   as part of the "initialization" for any servers.
 	dcpInitFn := func(pipeline *memdPipeline) error {
@@ -32,25 +33,26 @@ func CreateDcpAgent(memdAddrs, httpAddrs []string, useSsl bool, bucketName strin
 		}
 		return doOpenDcpChannel(pipeline, dcpStreamName)
 	}
-	return createAgent(memdAddrs, httpAddrs, useSsl, bucketName, dcpInitFn)
+	return createAgent(memdAddrs, httpAddrs, useSsl, bucketName, password, dcpInitFn)
 }
 
-func CreateAgent(memdAddrs, httpAddrs []string, useSsl bool, bucketName string, authFn AuthFunc) (*Agent, error) {
+func CreateAgent(memdAddrs, httpAddrs []string, useSsl bool, bucketName, password string, authFn AuthFunc) (*Agent, error) {
 	initFn := func(pipeline *memdPipeline) error {
 		return authFn(&authClient{pipeline})
 	}
-	return createAgent(memdAddrs, httpAddrs, useSsl, bucketName, initFn)
+	return createAgent(memdAddrs, httpAddrs, useSsl, bucketName, password, initFn)
 }
 
-func createAgent(memdAddrs, httpAddrs []string, useSsl bool, bucketName string, initFn memdInitFunc) (*Agent, error) {
+func createAgent(memdAddrs, httpAddrs []string, useSsl bool, bucketName, password string, initFn memdInitFunc) (*Agent, error) {
 	tlsc := &tls.Config{
 		InsecureSkipVerify: true,
 	}
 	c := &Agent{
-		bucket:  bucketName,
-		useSsl:  useSsl,
-		initFn:  initFn,
-		httpCli: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsc}},
+		bucket:   bucketName,
+		password: password,
+		useSsl:   useSsl,
+		initFn:   initFn,
+		httpCli:  &http.Client{Transport: &http.Transport{TLSClientConfig: tlsc}},
 	}
 	if err := c.connect(memdAddrs, httpAddrs); err != nil {
 		return nil, err

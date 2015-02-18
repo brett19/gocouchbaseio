@@ -3,6 +3,7 @@ package gocouchbaseio
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -78,9 +79,28 @@ func (c *Agent) httpLooper(firstCfgFn func(*cfgBucket, error)) {
 
 		// HTTP request time!
 		uri := fmt.Sprintf("%s/pools/default/bucketsStreaming/%s", pickedSrv, c.bucket)
-		resp, err := c.httpCli.Get(uri)
+
+		req, err := http.NewRequest("GET", uri, nil)
 		if err != nil {
-			logDebugf("Failed to connect to host.")
+			logDebugf("Failed to build HTTP config request. %v", err)
+			continue
+		}
+
+		req.SetBasicAuth(c.bucket, c.password)
+
+		resp, err := c.httpCli.Do(req)
+		if err != nil {
+			logDebugf("Failed to connect to host. %v", err)
+			continue
+		}
+
+		if resp.StatusCode != 200 {
+			if resp.StatusCode == 401 {
+				logDebugf("Failed to connect to host, bad auth.")
+				firstCfgFn(nil, &memdError{StatusAuthError})
+				return
+			}
+			logDebugf("Failed to connect to host, unexpected status code: %v.", resp.StatusCode)
 			continue
 		}
 
